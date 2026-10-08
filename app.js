@@ -50,7 +50,8 @@ function normalize(t) {
     id: t.id || uid(), title: String(t.title || '할 일'), icon: t.icon || '✅', color: t.color || COLORS[0],
     date: t.date ?? null, start: Number.isFinite(t.start) ? t.start : null,
     duration: Number.isFinite(t.duration) ? t.duration : 30,
-    repeat: ['none', 'daily', 'weekdays', 'weekly', 'monthly'].includes(t.repeat) ? t.repeat : 'none',
+    repeat: ['none', 'daily', 'weekdays', 'weekly', 'days', 'monthly'].includes(t.repeat) ? t.repeat : 'none',
+    repeatDays: Array.isArray(t.repeatDays) ? [...new Set(t.repeatDays.filter(d => Number.isInteger(d) && d >= 0 && d <= 6))].sort() : [],
     exceptions: Array.isArray(t.exceptions) ? t.exceptions : [],
     done: t.done && typeof t.done === 'object' ? t.done : {},
     subtasks: Array.isArray(t.subtasks) ? t.subtasks : [],
@@ -79,6 +80,7 @@ function occursOn(t, k) {
     case 'daily': return true;
     case 'weekdays': return d.getDay() >= 1 && d.getDay() <= 5;
     case 'weekly': return d.getDay() === s.getDay();
+    case 'days': return t.repeatDays.includes(d.getDay());
     case 'monthly': return d.getDate() === s.getDate();
   }
   return false;
@@ -213,7 +215,7 @@ function renderDay() {
         h('div', { class: 'range' }, t.duration ? `${fmtTime(t.start)} – ${fmtTime(end)} (${fmtDur(t.duration)})` : fmtTime(t.start)),
         h('div', { class: 'title' }, t.title),
         h('div', { class: 'meta' },
-          t.repeat !== 'none' && h('span', {}, '🔁 ' + repeatLabel(t.repeat)),
+          t.repeat !== 'none' && h('span', {}, '🔁 ' + repeatLabel(t)),
           t.subtasks.length > 0 && h('span', {}, `☑︎ ${subDone}/${t.subtasks.length}`),
           t.notes && h('span', {}, '📝'),
           overlap && h('span', { class: 'warn' }, '⚠︎ 겹침'),
@@ -246,7 +248,11 @@ function renderInbox() {
   )));
 }
 
-const repeatLabel = r => ({ daily: '매일', weekdays: '평일', weekly: '매주', monthly: '매월' }[r] || '');
+const weekOrder = () => [0, 1, 2, 3, 4, 5, 6].map(i => (i + db.settings.weekStart) % 7);
+const repeatLabel = t => t.repeat === 'days'
+  ? '매주 ' + weekOrder().filter(d => t.repeatDays.includes(d)).map(d => WEEKDAYS[d]).join('·')
+  : ({ daily: '매일', weekdays: '평일', weekly: '매주', monthly: '매월' }[t.repeat] || '');
+const defaultRepeatDays = () => [parseKey($('fDate').value || sel).getDay()];
 
 function suggestStart() {
   // first 30-minute free slot from now (today) or 09:00 (other days)
@@ -351,6 +357,16 @@ function paintEditor() {
   $('dateField').hidden = draft.when === 'inbox';
   $('timeField').hidden = draft.when !== 'timed';
   $('repeatField').hidden = draft.when === 'inbox';
+  $('daysField').hidden = draft.when === 'inbox' || draft.repeat !== 'days';
+  $('dayChips').replaceChildren(...weekOrder().map(d => h('button', {
+    type: 'button', class: draft.repeatDays.includes(d) ? 'on' : '', 'aria-pressed': String(draft.repeatDays.includes(d)),
+    onclick: () => {
+      const on = draft.repeatDays.includes(d);
+      if (on && draft.repeatDays.length === 1) return;
+      draft.repeatDays = on ? draft.repeatDays.filter(x => x !== d) : [...draft.repeatDays, d].sort();
+      paintEditor();
+    },
+  }, WEEKDAYS[d])));
   $('durField').hidden = draft.when === 'allday';
 
   const custom = !DURATIONS.includes(draft.duration);
@@ -407,13 +423,14 @@ function commitEditor() {
   if (draft.when === 'inbox') {
     // completion state belongs to a date once scheduled; keep only the inbox flag
     if (editing?.date) draft.done = {};
-    draft.date = null; draft.start = null; draft.repeat = 'none';
+    draft.date = null; draft.start = null; draft.repeat = 'none'; draft.repeatDays = [];
   } else {
     if (!editing?.date && editing) draft.done = {}; // moving out of inbox
     const newDate = $('fDate').value || sel;
     draft.date = newDate;
     draft.start = draft.when === 'timed' ? parseTime($('fStart').value || '09:00') : null;
     draft.repeat = $('fRepeat').value;
+    draft.repeatDays = draft.repeat === 'days' ? (draft.repeatDays.length ? draft.repeatDays : defaultRepeatDays()) : [];
     if (draft.when === 'allday') draft.duration = draft.duration || 0;
   }
   const { when, _start, ...clean } = draft;
@@ -563,6 +580,11 @@ $('whenSeg').onclick = e => {
   if (!w) return;
   draft.when = w;
   if (w === 'inbox' && editing?.repeat !== 'none') $('fRepeat').value = 'none';
+  paintEditor();
+};
+$('fRepeat').onchange = e => {
+  draft.repeat = e.target.value;
+  if (draft.repeat === 'days' && !draft.repeatDays.length) draft.repeatDays = defaultRepeatDays();
   paintEditor();
 };
 $('subAddBtn').onclick = addSubtask;
