@@ -31,12 +31,14 @@ let sel = todayKey();
 let view = 'dayView';
 
 function load() {
-  const fallback = { tasks: [], settings: { theme: 'system', weekStart: 1, notify: false } };
+  const fallback = { tasks: [], settings: { theme: 'system', weekStart: 1, notify: false, customIcons: [], customColors: [] } };
   try {
     const raw = localStorage.getItem(STORE_KEY);
     if (!raw) return seed(fallback);
     const data = JSON.parse(raw);
-    return { tasks: Array.isArray(data.tasks) ? data.tasks.map(normalize) : [], settings: { ...fallback.settings, ...data.settings } };
+    const settings = { ...fallback.settings, ...data.settings };
+    for (const k of ['customIcons', 'customColors']) if (!Array.isArray(settings[k])) settings[k] = [];
+    return { tasks: Array.isArray(data.tasks) ? data.tasks.map(normalize) : [], settings };
   } catch { return fallback; }
 }
 function save() {
@@ -324,14 +326,26 @@ function paintEditor() {
   ip.textContent = draft.icon;
   ip.style.setProperty('--c', draft.color);
 
-  $('emojiGrid').replaceChildren(...EMOJIS.map(e => h('button', {
-    type: 'button', class: e === draft.icon ? 'on' : '', onclick: () => { draft.icon = e; $('emojiGrid').hidden = true; paintEditor(); },
-  }, e)));
+  const { customIcons, customColors } = db.settings;
+  $('emojiGrid').replaceChildren(
+    ...[...customIcons, ...EMOJIS.filter(e => !customIcons.includes(e))].map(e => h('button', {
+      type: 'button', class: e === draft.icon ? 'on' : '', onclick: () => { draft.icon = e; $('emojiGrid').hidden = true; paintEditor(); },
+    }, e)),
+    h('input', {
+      class: 'emoji-add', placeholder: '+ 직접', maxlength: '16', 'aria-label': '아이콘 직접 입력 (이모지 또는 글자)',
+      onkeydown: e => { if (e.key === 'Enter') { e.preventDefault(); e.target.blur(); } },
+      onchange: e => addCustomIcon(e.target.value),
+    }),
+  );
 
-  $('colorRow').replaceChildren(...COLORS.map(c => h('button', {
-    type: 'button', class: c === draft.color ? 'on' : '', style: `--c:${c}`, 'aria-label': `색상 ${c}`,
-    onclick: () => { draft.color = c; paintEditor(); },
-  })));
+  $('colorRow').replaceChildren(
+    ...[...COLORS, ...customColors].map(c => h('button', {
+      type: 'button', class: c === draft.color ? 'on' : '', style: `--c:${c}`, 'aria-label': `색상 ${c}`,
+      onclick: () => { draft.color = c; paintEditor(); },
+    })),
+    h('label', { class: 'color-add', 'aria-label': '색상 추가' }, '+',
+      h('input', { type: 'color', value: draft.color, onchange: e => addCustomColor(e.target.value) })),
+  );
 
   for (const b of $('whenSeg').children) b.classList.toggle('on', b.dataset.when === draft.when);
   $('dateField').hidden = draft.when === 'inbox';
@@ -356,6 +370,25 @@ function paintEditor() {
     h('span', {}, s.title),
     h('button', { type: 'button', class: 'x', 'aria-label': '하위 작업 삭제', onclick: () => { draft.subtasks = draft.subtasks.filter(x => x !== s); paintEditor(); } }, '×'),
   )));
+}
+
+function addCustomIcon(v) {
+  const icon = [...new Intl.Segmenter().segment(v.trim())][0]?.segment;
+  if (!icon) return;
+  const list = db.settings.customIcons;
+  if (!EMOJIS.includes(icon)) db.settings.customIcons = [icon, ...list.filter(x => x !== icon)].slice(0, 30);
+  save();
+  draft.icon = icon;
+  $('emojiGrid').hidden = true;
+  paintEditor();
+}
+
+function addCustomColor(c) {
+  c = c.toLowerCase();
+  if (!COLORS.includes(c) && !db.settings.customColors.includes(c)) db.settings.customColors.push(c);
+  save();
+  draft.color = c;
+  paintEditor();
 }
 
 function addSubtask() {
@@ -446,6 +479,7 @@ function openSettings() {
   $('sTheme').value = db.settings.theme;
   $('sWeekStart').value = String(db.settings.weekStart);
   $('sNotify').checked = !!db.settings.notify;
+  paintCustom();
   const standalone = matchMedia('(display-mode: standalone)').matches || navigator.standalone;
   const ios = /iphone|ipad|ipod/i.test(navigator.userAgent);
   $('installHint').textContent = standalone ? '홈 화면 앱으로 실행 중입니다.'
@@ -457,6 +491,17 @@ function openSettings() {
     } }, '📲 앱으로 설치'));
   }
   $('settings').showModal();
+}
+
+function paintCustom() {
+  const { customIcons, customColors } = db.settings;
+  $('customField').hidden = !customIcons.length && !customColors.length;
+  const remove = (key, v) => { db.settings[key] = db.settings[key].filter(x => x !== v); save(); paintCustom(); };
+  $('customList').replaceChildren(
+    ...customIcons.map(e => h('button', { type: 'button', class: 'custom-item', 'aria-label': `${e} 삭제`, onclick: () => remove('customIcons', e) }, e, h('b', {}, '×'))),
+    ...customColors.map(c => h('button', { type: 'button', class: 'custom-item', 'aria-label': `색상 ${c} 삭제`, onclick: () => remove('customColors', c) },
+      h('i', { style: `background:${c}` }), h('b', {}, '×'))),
+  );
 }
 
 function exportData() {
