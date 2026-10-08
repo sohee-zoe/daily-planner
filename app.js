@@ -101,6 +101,7 @@ function occursOn(t, k) {
 const doneKey = (t, k) => (t.date ? k : 'inbox');
 const isDone = (t, k) => !!t.done[doneKey(t, k)];
 const tasksOn = k => db.tasks.filter(t => occursOn(t, k));
+const liveTask = t => t && db.tasks.find(x => x.id === t.id);
 const seriesOf = t => t.seriesId && db.tasks.find(x => x.id === t.seriesId && x.exceptions.includes(t.seriesDate));
 const isRecurringEdit = () => editing && editing.repeat !== 'none' && editingFromDate;
 
@@ -444,6 +445,10 @@ async function commitEditor() {
     ]);
     if (scope === 'cancel') return false;
   }
+  if (editing) {
+    editing = liveTask(editing) || editing;
+    if (!db.tasks.includes(editing)) db.tasks.push(editing);
+  }
   draft.title = title;
   draft.notes = $('fNotes').value.trim();
   if (draft.when === 'inbox') {
@@ -483,8 +488,9 @@ async function commitEditor() {
 }
 
 async function deleteCurrent() {
-  const t = editing;
+  let t = editing;
   if (!t) return;
+  const from = editingFromDate;
   let choice = 'all';
   if (t.repeat !== 'none' && editingFromDate) {
     $('editor').close();
@@ -503,14 +509,28 @@ async function deleteCurrent() {
   } else {
     $('editor').close();
   }
-  const snapshot = clone(db.tasks);
-  if (choice === 'one') t.exceptions.push(editingFromDate);
+  t = liveTask(t);
+  if (!t) { render(); return; }
+  const idx = db.tasks.indexOf(t);
+  const series = choice === 'restore' && seriesOf(t);
+  if (choice === 'one') { if (!t.exceptions.includes(from)) t.exceptions.push(from); }
   else {
-    if (choice === 'restore') { const s = seriesOf(t); s.exceptions = s.exceptions.filter(k => k !== t.seriesDate); }
-    db.tasks = db.tasks.filter(x => x !== t);
+    if (series) series.exceptions = series.exceptions.filter(k => k !== t.seriesDate);
+    db.tasks.splice(idx, 1);
   }
   save(); render();
-  toast(choice === 'restore' ? '반복 일정으로 되돌렸어요' : '삭제했어요', '되돌리기', () => { db.tasks = snapshot.map(normalize); save(); render(); });
+  const undo = () => {
+    if (choice === 'one') {
+      const x = liveTask(t);
+      if (x) x.exceptions = x.exceptions.filter(k => k !== from);
+    } else {
+      if (!liveTask(t)) db.tasks.splice(Math.min(idx, db.tasks.length), 0, t);
+      const s = series && liveTask(series);
+      if (s && !s.exceptions.includes(t.seriesDate)) s.exceptions.push(t.seriesDate);
+    }
+    save(); render();
+  };
+  toast(choice === 'restore' ? '반복 일정으로 되돌렸어요' : '삭제했어요', '되돌리기', undo);
 }
 
 /* ================= notifications (while open) ================= */
@@ -661,7 +681,9 @@ $('importFile').onchange = e => { const f = e.target.files[0]; e.target.value = 
 
 // close sheets by tapping the backdrop
 for (const d of document.querySelectorAll('dialog.sheet')) {
-  d.addEventListener('click', e => { if (e.target === d) d.close(); });
+  let downOnBackdrop = false;
+  d.addEventListener('pointerdown', e => { downOnBackdrop = e.target === d; });
+  d.addEventListener('click', e => { if (e.target === d && downOnBackdrop) d.close(); });
 }
 
 swipe($('week'), () => { sel = addDays(sel, 7); render(); }, () => { sel = addDays(sel, -7); render(); });
