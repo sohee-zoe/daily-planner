@@ -56,6 +56,7 @@ function normalize(t) {
     done: t.done && typeof t.done === 'object' ? t.done : {},
     subtasks: Array.isArray(t.subtasks) ? t.subtasks : [],
     notes: String(t.notes || ''), createdAt: t.createdAt || Date.now(),
+    seriesId: t.seriesId || null, seriesDate: t.seriesDate || null,
   };
 }
 function seed(base) {
@@ -88,6 +89,8 @@ function occursOn(t, k) {
 const doneKey = (t, k) => (t.date ? k : 'inbox');
 const isDone = (t, k) => !!t.done[doneKey(t, k)];
 const tasksOn = k => db.tasks.filter(t => occursOn(t, k));
+const seriesOf = t => t.seriesId && db.tasks.find(x => x.id === t.seriesId && x.exceptions.includes(t.seriesDate));
+const isRecurringEdit = () => editing && editing.repeat !== 'none' && editingFromDate;
 
 /* ================= tiny DOM helper ================= */
 function h(tag, attrs = {}, ...kids) {
@@ -216,6 +219,7 @@ function renderDay() {
         h('div', { class: 'title' }, t.title),
         h('div', { class: 'meta' },
           t.repeat !== 'none' && h('span', {}, '🔁 ' + repeatLabel(t)),
+          seriesOf(t) && h('span', {}, '🔁 변경됨'),
           t.subtasks.length > 0 && h('span', {}, `☑︎ ${subDone}/${t.subtasks.length}`),
           t.notes && h('span', {}, '📝'),
           overlap && h('span', { class: 'warn' }, '⚠︎ 겹침'),
@@ -316,7 +320,7 @@ function openEditor(task, preset = {}) {
 
   $('editorTitle').textContent = task ? '할 일 편집' : '새 할 일';
   $('fTitle').value = draft.title;
-  $('fDate').value = draft.date || sel;
+  $('fDate').value = isRecurringEdit() ? sel : draft.date || sel;
   $('fStart').value = fmtTime(draft.start ?? draft._start);
   $('fRepeat').value = draft.repeat;
   $('fNotes').value = draft.notes;
@@ -415,9 +419,19 @@ function addSubtask() {
   paintEditor();
 }
 
-function commitEditor() {
+async function commitEditor() {
   const title = $('fTitle').value.trim();
   if (!title) { $('fTitle').focus(); return false; }
+  const sameRepeat = $('fRepeat').value === editing?.repeat
+    && (editing.repeat !== 'days' || String(draft.repeatDays) === String(editing.repeatDays));
+  let scope = 'all';
+  if (isRecurringEdit() && draft.when !== 'inbox' && sameRepeat) {
+    scope = await ask('반복 일정입니다. 어디에 적용할까요?', [
+      { label: '이 날만', value: 'one' },
+      { label: '모든 반복', value: 'all' },
+    ]);
+    if (scope === 'cancel') return false;
+  }
   draft.title = title;
   draft.notes = $('fNotes').value.trim();
   if (draft.when === 'inbox') {
@@ -426,14 +440,29 @@ function commitEditor() {
     draft.date = null; draft.start = null; draft.repeat = 'none'; draft.repeatDays = [];
   } else {
     if (!editing?.date && editing) draft.done = {}; // moving out of inbox
-    const newDate = $('fDate').value || sel;
-    draft.date = newDate;
+    const keepSeriesDate = isRecurringEdit() && scope === 'all' && $('fRepeat').value !== 'none';
+    draft.date = keepSeriesDate ? editing.date : $('fDate').value || sel;
     draft.start = draft.when === 'timed' ? parseTime($('fStart').value || '09:00') : null;
     draft.repeat = $('fRepeat').value;
     draft.repeatDays = draft.repeat === 'days' ? (draft.repeatDays.length ? draft.repeatDays : defaultRepeatDays()) : [];
     if (draft.when === 'allday') draft.duration = draft.duration || 0;
   }
   const { when, _start, ...clean } = draft;
+  if (scope === 'one') {
+    const from = editingFromDate;
+    const t = normalize({
+      ...clean, id: uid(), repeat: 'none', repeatDays: [], exceptions: [], createdAt: Date.now(),
+      done: editing.done[from] ? { [clean.date]: true } : {},
+      subtasks: clean.subtasks.map(x => ({ ...x, id: uid() })),
+      seriesId: editing.id, seriesDate: from,
+    });
+    if (!editing.exceptions.includes(from)) editing.exceptions.push(from);
+    delete editing.done[from];
+    db.tasks.push(t);
+    sel = t.date;
+    save();
+    return true;
+  }
   const t = normalize(clean);
   if (editing) Object.assign(editing, t); else db.tasks.push(t);
   if (t.date && t.repeat === 'none') sel = t.date;
@@ -452,14 +481,24 @@ async function deleteCurrent() {
       { label: '모든 반복 삭제', value: 'all', danger: true },
     ]);
     if (choice === 'cancel') return;
+  } else if (seriesOf(t)) {
+    $('editor').close();
+    choice = await ask('반복 일정에서 바꾼 날입니다.', [
+      { label: '반복 일정으로 되돌리기', value: 'restore' },
+      { label: '이 날 삭제', value: 'all', danger: true },
+    ]);
+    if (choice === 'cancel') return;
   } else {
     $('editor').close();
   }
   const snapshot = clone(db.tasks);
   if (choice === 'one') t.exceptions.push(editingFromDate);
-  else db.tasks = db.tasks.filter(x => x !== t);
+  else {
+    if (choice === 'restore') { const s = seriesOf(t); s.exceptions = s.exceptions.filter(k => k !== t.seriesDate); }
+    db.tasks = db.tasks.filter(x => x !== t);
+  }
   save(); render();
-  toast('삭제했어요', '되돌리기', () => { db.tasks = snapshot.map(normalize); save(); render(); });
+  toast(choice === 'restore' ? '반복 일정으로 되돌렸어요' : '삭제했어요', '되돌리기', () => { db.tasks = snapshot.map(normalize); save(); render(); });
 }
 
 /* ================= notifications (while open) ================= */
@@ -590,9 +629,9 @@ $('fRepeat').onchange = e => {
 $('subAddBtn').onclick = addSubtask;
 $('subInput').onkeydown = e => { if (e.key === 'Enter') { e.preventDefault(); addSubtask(); } };
 $('cancelEdit').onclick = () => $('editor').close();
-$('editorForm').onsubmit = e => {
+$('editorForm').onsubmit = async e => {
   e.preventDefault();
-  if (commitEditor()) { $('editor').close(); render(); }
+  if (await commitEditor()) { $('editor').close(); render(); }
 };
 $('deleteBtn').onclick = deleteCurrent;
 
