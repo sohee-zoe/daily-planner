@@ -1,5 +1,5 @@
 // Bump VERSION whenever any app file changes so installed copies update.
-const VERSION = 'planner-v5';
+const VERSION = 'planner-v6';
 const ASSETS = [
   './', 'index.html', 'styles.css', 'app.js', 'manifest.webmanifest',
   'icons/icon.svg', 'icons/icon-192.png', 'icons/icon-512.png', 'icons/apple-touch-icon.png',

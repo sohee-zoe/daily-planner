@@ -24,22 +24,34 @@ function fmtDur(m) {
 }
 const clone = o => JSON.parse(JSON.stringify(o));
 const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+const isObj = v => v != null && typeof v === 'object' && !Array.isArray(v);
+const isDateKey = v => typeof v === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(v);
+const isColor = v => typeof v === 'string' && /^#[0-9a-f]{6}$/i.test(v);
+const clampInt = (v, lo, hi) => Math.min(hi, Math.max(lo, Math.round(v)));
+const normalizeAll = list => (Array.isArray(list) ? list.filter(isObj).map(normalize) : []);
 
 /* ================= state & storage ================= */
+let loadFailed = false;
 let db = load();
 let sel = todayKey();
 let view = 'dayView';
 
 function load() {
+  loadFailed = false;
   const fallback = { tasks: [], settings: { theme: 'system', weekStart: 1, notify: false, customIcons: [], customColors: [] } };
   try {
     const raw = localStorage.getItem(STORE_KEY);
     if (!raw) return seed(fallback);
     const data = JSON.parse(raw);
     const settings = { ...fallback.settings, ...data.settings };
-    for (const k of ['customIcons', 'customColors']) if (!Array.isArray(settings[k])) settings[k] = [];
-    return { tasks: Array.isArray(data.tasks) ? data.tasks.map(normalize) : [], settings };
-  } catch { return fallback; }
+    settings.customIcons = Array.isArray(settings.customIcons) ? settings.customIcons.filter(x => typeof x === 'string') : [];
+    settings.customColors = Array.isArray(settings.customColors) ? settings.customColors.filter(isColor) : [];
+    return { tasks: normalizeAll(data.tasks), settings };
+  } catch {
+    loadFailed = true;
+    try { localStorage.setItem(STORE_KEY + '.bak', localStorage.getItem(STORE_KEY)); } catch { /* storage unavailable */ }
+    return fallback;
+  }
 }
 function save() {
   try { localStorage.setItem(STORE_KEY, JSON.stringify(db)); }
@@ -47,16 +59,16 @@ function save() {
 }
 function normalize(t) {
   return {
-    id: t.id || uid(), title: String(t.title || '할 일'), icon: t.icon || '✅', color: t.color || COLORS[0],
-    date: t.date ?? null, start: Number.isFinite(t.start) ? t.start : null,
-    duration: Number.isFinite(t.duration) ? t.duration : 30,
+    id: String(t.id || uid()), title: String(t.title || '할 일'), icon: String(t.icon || '✅'), color: isColor(t.color) ? t.color : COLORS[0],
+    date: isDateKey(t.date) ? t.date : null, start: Number.isFinite(t.start) ? clampInt(t.start, 0, 1439) : null,
+    duration: Number.isFinite(t.duration) ? clampInt(t.duration, 0, 1440) : 30,
     repeat: ['none', 'daily', 'weekdays', 'weekly', 'days', 'monthly'].includes(t.repeat) ? t.repeat : 'none',
     repeatDays: Array.isArray(t.repeatDays) ? [...new Set(t.repeatDays.filter(d => Number.isInteger(d) && d >= 0 && d <= 6))].sort() : [],
-    exceptions: Array.isArray(t.exceptions) ? t.exceptions : [],
-    done: t.done && typeof t.done === 'object' ? t.done : {},
-    subtasks: Array.isArray(t.subtasks) ? t.subtasks : [],
-    notes: String(t.notes || ''), createdAt: t.createdAt || Date.now(),
-    seriesId: t.seriesId || null, seriesDate: t.seriesDate || null,
+    exceptions: Array.isArray(t.exceptions) ? t.exceptions.filter(isDateKey) : [],
+    done: isObj(t.done) ? t.done : {},
+    subtasks: Array.isArray(t.subtasks) ? t.subtasks.filter(isObj).map(x => ({ id: String(x.id || uid()), title: String(x.title || ''), done: !!x.done })) : [],
+    notes: String(t.notes || ''), createdAt: Number.isFinite(t.createdAt) ? t.createdAt : Date.now(),
+    seriesId: t.seriesId ? String(t.seriesId) : null, seriesDate: isDateKey(t.seriesDate) ? t.seriesDate : null,
   };
 }
 function seed(base) {
@@ -82,7 +94,7 @@ function occursOn(t, k) {
     case 'weekdays': return d.getDay() >= 1 && d.getDay() <= 5;
     case 'weekly': return d.getDay() === s.getDay();
     case 'days': return t.repeatDays.includes(d.getDay());
-    case 'monthly': return d.getDate() === s.getDate();
+    case 'monthly': return d.getDate() === Math.min(s.getDate(), new Date(d.getFullYear(), d.getMonth() + 1, 0).getDate());
   }
   return false;
 }
@@ -287,7 +299,7 @@ function showView(v) {
 let toastTimer;
 function toast(msg, actionLabel, action) {
   const el = $('toast');
-  el.replaceChildren(h('span', {}, msg), actionLabel && h('button', { onclick: () => { action(); el.classList.remove('show'); } }, actionLabel));
+  el.replaceChildren(h('span', {}, msg), ...(actionLabel ? [h('button', { onclick: () => { action(); el.classList.remove('show'); } }, actionLabel)] : []));
   el.classList.add('show');
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => el.classList.remove('show'), 4000);
@@ -576,7 +588,7 @@ async function importData(file) {
       { label: '기존 데이터 교체', value: 'replace', danger: true },
     ]);
     if (choice === 'cancel') return;
-    const incoming = data.tasks.map(normalize);
+    const incoming = normalizeAll(data.tasks);
     if (choice === 'replace') db.tasks = incoming;
     else {
       const ids = new Set(db.tasks.map(t => t.id));
@@ -618,7 +630,6 @@ $('whenSeg').onclick = e => {
   const w = e.target.closest('button')?.dataset.when;
   if (!w) return;
   draft.when = w;
-  if (w === 'inbox' && editing?.repeat !== 'none') $('fRepeat').value = 'none';
   paintEditor();
 };
 $('fRepeat').onchange = e => {
@@ -666,11 +677,16 @@ setInterval(() => {
 document.addEventListener('visibilitychange', () => { if (!document.hidden && !document.querySelector('dialog[open]')) render(); });
 
 // sync between tabs
-addEventListener('storage', e => { if (e.key === STORE_KEY) { db = load(); render(); } });
+addEventListener('storage', e => {
+  if (e.key !== STORE_KEY) return;
+  const next = load();
+  if (!loadFailed) { db = next; render(); }
+});
 
 if ('serviceWorker' in navigator && location.protocol !== 'file:') {
   navigator.serviceWorker.register('sw.js').catch(() => {});
 }
 
-save();
+if (loadFailed) toast('저장된 데이터를 읽지 못해 백업해 두었어요 (planner.v1.bak)');
+else save();
 render();
